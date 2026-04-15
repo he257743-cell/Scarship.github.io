@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>创造之域 - 高清体素沙盒</title>
+<style>
+    body { margin: 0; overflow: hidden; background-color: #87CEEB; font-family: 'Segoe UI', sans-serif; user-select: none; }
+    canvas { display: block; }
+    
+    /* 准星 */
+    #crosshair {
+        position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 20px; height: 20px;
+        pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+        content: ''; position: absolute; background: rgba(255, 255, 255, 0.8);
+    }
+    #crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
+    #crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
+
+    /* 开始菜单 */
+    #start-menu {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(5px);
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        color: white; transition: opacity 0.3s; z-index: 10;
+    }
+    #start-menu h1 { font-size: 50px; margin-bottom: 10px; text-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+    #start-menu p { font-size: 18px; margin-bottom: 30px; line-height: 1.8; text-align: center; }
+    .btn {
+        background: #4CAF50; color: white; border: none; padding: 15px 40px;
+        font-size: 24px; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        transition: transform 0.1s, background 0.2s;
+    }
+    .btn:hover { background: #45a049; transform: scale(1.05); }
+
+    /* 物品栏 */
+    #hotbar {
+        position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+        display: flex; gap: 10px; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 10px;
+    }
+    .slot {
+        width: 50px; height: 50px; border: 2px solid #555; border-radius: 5px;
+        display: flex; justify-content: center; align-items: center;
+        color: white; font-weight: bold; position: relative;
+    }
+    .slot.active { border-color: #fff; box-shadow: 0 0 10px #fff; transform: scale(1.1); }
+    .slot-key { position: absolute; top: 2px; left: 4px; font-size: 12px; }
+    
+    /* 材质颜色预览 */
+    #slot1 { background: linear-gradient(180deg, #55aa55 50%, #8b5a2b 50%); } /* 草地 */
+    #slot2 { background: #6b4226; } /* 原木 */
+    #slot3 { background: #228b22; opacity: 0.9; } /* 树叶 */
+    #slot4 { background: #888888; } /* 石头 */
+
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+<div id="crosshair"></div>
+
+<div id="hotbar">
+    <div class="slot active" id="slot1"><span class="slot-key">1</span>草</div>
+    <div class="slot" id="slot2"><span class="slot-key">2</span>木</div>
+    <div class="slot" id="slot3"><span class="slot-key">3</span>叶</div>
+    <div class="slot" id="slot4"><span class="slot-key">4</span>石</div>
+</div>
+
+<div id="start-menu">
+    <h1>创造之域</h1>
+    <p>鼠标左键：破坏方块 | 鼠标右键：放置方块<br>WASD：移动 | 空格：跳跃 | 1~4：切换物品</p>
+    <button class="btn" id="start-btn">进入世界</button>
+</div>
+
+<script>
+    // --- 1. 基础场景设置 ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB); // 蓝天
+    scene.fog = new THREE.FogExp2(0x87CEEB, 0.015); // 远处雾化，增加真实感
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true; // 开启阴影
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap; // 柔和阴影
+    document.body.appendChild(renderer.domElement);
+
+    // --- 2. 光影系统 ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5); // 环境光
+    scene.add(ambientLight);
+
+    const sunLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    sunLight.position.set(50, 100, 50);
+    sunLight.castShadow = true;
+    // 优化阴影相机范围以覆盖整个视口
+    sunLight.shadow.camera.left = -60;
+    sunLight.shadow.camera.right = 60;
+    sunLight.shadow.camera.top = 60;
+    sunLight.shadow.camera.bottom = -60;
+    sunLight.shadow.mapSize.width = 2048; // 高清阴影
+    sunLight.shadow.mapSize.height = 2048;
+    scene.add(sunLight);
+
+    // --- 3. 材质与方块定义 ---
+    const textureLoader = new THREE.TextureLoader();
+    
+    // 我们用纯色模拟高清材质，通过粗糙度体现质感
+    const materials = {
+        grass: [
+            new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 }), // 右
+            new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 }), // 左
+            new THREE.MeshStandardMaterial({ color: 0x55aa55, roughness: 0.8 }), // 上(草)
+            new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 }), // 下
+            new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 }), // 前
+            new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 })  // 后
+        ],
+        dirt: new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 }),
+        stone: new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.6 }),
+        wood: new THREE.MeshStandardMaterial({ color: 0x6b4226, roughness: 0.8 }),
+        leaves: new THREE.MeshStandardMaterial({ color: 0x228b22, roughness: 0.9, transparent: true, opacity: 0.9 }),
+        sand: new THREE.MeshStandardMaterial({ color: 0xeed8ae, roughness: 1.0 })
+    };
+
+    const blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+    
+    // 用于存放所有方块的地图数据，方便碰撞检测
+    const worldBlocks = new Map();
+    const solidObjects = []; // 供射线检测使用
+
+    function addBlock(x, y, z, type) {
+        const key = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+        if (worldBlocks.has(key)) return; // 避免重叠
+
+        let mat = materials[type];
+        const mesh = new THREE.Mesh(blockGeometry, mat);
+        mesh.position.set(x, y, z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        scene.add(mesh);
+        
+        worldBlocks.set(key, mesh);
+        solidObjects.push(mesh);
+    }
+
+    function removeBlock(mesh) {
+        const key = `${Math.floor(mesh.position.x)},${Math.floor(mesh.position.y)},${Math.floor(mesh.position.z)}`;
+        worldBlocks.delete(key);
+        solidObjects.splice(solidObjects.indexOf(mesh), 1);
+        scene.remove(mesh);
+        mesh.geometry.dispose();
+    }
+
+    // --- 4. 程序化世界生成 (Procedural Generation) ---
+    const WORLD_SIZE = 64; // 64x64的世界
+    const WATER_LEVEL = -2;
+
+    // 自制简单的伪随机高度函数模拟地形
+    function getNoiseHeight(x, z) {
+        const nx = x * 0.05, nz = z * 0.05;
+        // 叠加不同的正弦波创造起伏
+        let h = Math.sin(nx) * 3 + Math.cos(nz) * 3 + Math.sin(nx + nz) * 2;
+        return Math.floor(h);
+    }
+
+    function generateWorld() {
+        for (let x = -WORLD_SIZE/2; x < WORLD_SIZE/2; x++) {
+            for (let z = -WORLD_SIZE/2; z < WORLD_SIZE/2; z++) {
+                let h = getNoiseHeight(x, z);
+                
+                // 表面层
+                if (h <= WATER_LEVEL) {
+                    addBlock(x, h, z, 'sand');
+                } else {
+                    addBlock(x, h, z, 'grass');
+                }
+
+                // 填充地下
+                addBlock(x, h - 1, z, 'dirt');
+                addBlock(x, h - 2, z, 'stone');
+                
+                // 随机生成树木
+                if (h > WATER_LEVEL && Math.random() < 0.02) {
+                    generateTree(x, h + 1, z);
+                }
+            }
+        }
+    }
+
+    function generateTree(bx, by, bz) {
+        const height = Math.floor(Math.random() * 2) + 4;
+        // 树干
+        for (let i = 0; i < height; i++) {
+            addBlock(bx, by + i, bz, 'wood');
+        }
+        // 树冠
+        for (let x = -2; x <= 2; x++) {
+            for (let y = height - 2; y <= height + 1; y++) {
+                for (let z = -2; z <= 2; z++) {
+                    if (Math.abs(x) === 2 && Math.abs(z) === 2 && y === height + 1) continue; // 修剪树冠边缘
+                    if (x===0 && z===0 && y < height) continue; // 避开树干
+                    addBlock(bx + x, by + y, bz + z, 'leaves');
+                }
+            }
+        }
+    }
+
+    generateWorld();
+
+    // --- 5. 湖面与天空生成 ---
+    // 动态水面
+    const waterGeo = new THREE.PlaneGeometry(WORLD_SIZE * 2, WORLD_SIZE * 2, 32, 32);
+    const waterMat = new THREE.MeshStandardMaterial({ 
+        color: 0x1E90FF, transparent: true, opacity: 0.6, 
+        roughness: 0.1, metalness: 0.1, side: THREE.DoubleSide 
+    });
+    const water = new THREE.Mesh(waterGeo, waterMat);
+    water.rotation.x = -Math.PI / 2;
+    water.position.y = WATER_LEVEL - 0.2; // 水位线
+    scene.add(water);
+
+    // 云层
+    const clouds = [];
+    const cloudMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, flatShading: true });
+    for (let i = 0; i < 20; i++) {
+        const size = Math.random() * 5 + 5;
+        const geo = new THREE.BoxGeometry(size * 2, size * 0.5, size);
+        const cloud = new THREE.Mesh(geo, cloudMat);
+        cloud.position.set(Math.random() * 200 - 100, 30 + Math.random() * 10, Math.random() * 200 - 100);
+        scene.add(cloud);
+        clouds.push(cloud);
+    }
+
+    // --- 6. 玩家与物理控制 ---
+    const pitchObject = new THREE.Object3D();
+    pitchObject.add(camera);
+    const yawObject = new THREE.Object3D();
+    yawObject.position.set(0, 10, 0); // 初始出生点
+    yawObject.add(pitchObject);
+    scene.add(yawObject);
+
+    let isLocked = false;
+    document.getElementById('start-btn').addEventListener('click', () => { document.body.requestPointerLock(); });
+    document.addEventListener('pointerlockchange', () => {
+        isLocked = document.pointerLockElement === document.body;
+        document.getElementById('start-menu').style.opacity = isLocked ? 0 : 1;
+        document.getElementById('start-menu').style.pointerEvents = isLocked ? 'none' : 'auto';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isLocked) return;
+        yawObject.rotation.y -= e.movementX * 0.002;
+        pitchObject.rotation.x -= e.movementY * 0.002;
+        pitchObject.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitchObject.rotation.x));
+    });
+
+    const keys = { w: false, a: false, s: false, d: false, space: false };
+    document.addEventListener('keydown', (e) => { 
+        if(e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = true; 
+        if(e.code === 'Space') keys.space = true;
+    });
+    document.addEventListener('keyup', (e) => { 
+        if(e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = false; 
+        if(e.code === 'Space') keys.space = false;
+    });
+
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+    let canJump = false;
+
+    // 简易碰撞检测：检查脚下是否有方块
+    function checkGround() {
+        const px = Math.floor(yawObject.position.x + 0.5);
+        const pz = Math.floor(yawObject.position.z + 0.5);
+        const py = Math.floor(yawObject.position.y - 1.5); // 玩家身高下方
+        return worldBlocks.has(`${px},${py},${pz}`);
+    }
+
+    // --- 7. 建造与破坏系统 ---
+    let currentBlockType = 'grass';
+    const blockTypes = ['grass', 'wood', 'leaves', 'stone'];
+    
+    // 切换物品栏
+    document.addEventListener('keydown', (e) => {
+        if (e.key >= '1' && e.key <= '4') {
+            document.querySelectorAll('.slot').forEach(el => el.classList.remove('active'));
+            document.getElementById('slot' + e.key).classList.add('active');
+            currentBlockType = blockTypes[parseInt(e.key) - 1];
+        }
+    });
+
+    const raycaster = new THREE.Raycaster();
+    document.addEventListener('mousedown', (e) => {
+        if (!isLocked) return;
+        raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+        const intersects = raycaster.intersectObjects(solidObjects);
+
+        if (intersects.length > 0) {
+            const hit = intersects[0];
+            if (hit.distance > 6) return; // 手臂够不到太远
+
+            if (e.button === 0) { // 左键：破坏
+                removeBlock(hit.object);
+            } else if (e.button === 2) { // 右键：放置
+                // 放置在法线方向（紧贴着被点中的那一面）
+                const pos = hit.object.position.clone().add(hit.face.normal);
+                // 防止把方块放在自己头里
+                if (Math.abs(pos.x - yawObject.position.x) < 1 && Math.abs(pos.z - yawObject.position.z) < 1 && Math.abs(pos.y - yawObject.position.y) < 2) return;
+                addBlock(pos.x, pos.y, pos.z, currentBlockType);
+            }
+        }
+    });
+
+    // 阻止右键默认菜单
+    window.addEventListener('contextmenu', e => e.preventDefault());
+
+    // --- 8. 主渲染循环 ---
+    let prevTime = performance.now();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const time = performance.now();
+        const delta = (time - prevTime) / 1000;
+        prevTime = time;
+
+        // 水面波浪动画
+        const positions = water.geometry.attributes.position.array;
+        for (let i = 2; i < positions.length; i += 3) {
+            // 通过正弦波制造涟漪
+            positions[i] = Math.sin((time * 0.002) + (positions[i-2] * 0.1)) * 0.2; 
+        }
+        water.geometry.attributes.position.needsUpdate = true;
+
+        // 云朵飘动
+        clouds.forEach(c => {
+            c.position.x -= 1 * delta;
+            if(c.position.x < -100) c.position.x = 100;
+        });
+
+        // 玩家物理与移动
+        if (isLocked) {
+            velocity.x -= velocity.x * 10.0 * delta;
+            velocity.z -= velocity.z * 10.0 * delta;
+            velocity.y -= 25.0 * delta; // 重力
+
+            direction.z = Number(keys.w) - Number(keys.s);
+            direction.x = Number(keys.d) - Number(keys.a);
+            direction.normalize();
+
+            const speed = 40.0;
+            if (keys.w || keys.s) velocity.z -= direction.z * speed * delta;
+            if (keys.a || keys.d) velocity.x -= direction.x * speed * delta;
+
+            const onGround = checkGround();
+            if (onGround) {
+                velocity.y = Math.max(0, velocity.y); // 停止下落
+                canJump = true;
+                // 修正高度，防止陷入地下
+                yawObject.position.y = Math.ceil(yawObject.position.y - 1.5) + 1.5;
+            }
+
+            if (keys.space && canJump) {
+                velocity.y = 8.0; // 跳跃力度
+                canJump = false;
+            }
+
+            yawObject.translateX(-velocity.x * delta);
+            yawObject.translateZ(velocity.z * delta);
+            yawObject.position.y += velocity.y * delta;
+            
+            // 简单防掉出世界底线
+            if (yawObject.position.y < -10) {
+                velocity.y = 0;
+                yawObject.position.set(0, 10, 0); 
+            }
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    // 窗口适配
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    animate();
+</script>
+</body>
+</html>
